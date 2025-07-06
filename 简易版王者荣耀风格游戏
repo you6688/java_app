@@ -1,0 +1,620 @@
+#include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp>
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <ctime>
+#include <cstdlib>
+
+using namespace sf;
+using namespace std;
+
+// 游戏常量
+const int WINDOW_WIDTH = 1200;
+const int WINDOW_HEIGHT = 800;
+const float PLAYER_SPEED = 3.0f;
+const float PROJECTILE_SPEED = 8.0f;
+
+// 游戏实体基类
+class Entity {
+public:
+    Sprite sprite;
+    float health;
+    float maxHealth;
+    float speed;
+    bool alive;
+    Vector2f velocity;
+    
+    Entity() : health(100), maxHealth(100), speed(0), alive(true) {}
+    
+    virtual void update() {}
+    virtual void draw(RenderWindow& window) {
+        if (alive) {
+            window.draw(sprite);
+        }
+    }
+    
+    FloatRect getBounds() const {
+        return sprite.getGlobalBounds();
+    }
+    
+    Vector2f getPosition() const {
+        return sprite.getPosition();
+    }
+    
+    void setPosition(Vector2f pos) {
+        sprite.setPosition(pos);
+    }
+};
+
+// 玩家英雄类
+class Player : public Entity {
+public:
+    int level;
+    int experience;
+    int gold;
+    float attackDamage;
+    float attackSpeed;
+    float attackCooldown;
+    float skill1Cooldown;
+    float skill2Cooldown;
+    float ultimateCooldown;
+    
+    Player() : level(1), experience(0), gold(300), attackDamage(30), attackSpeed(1.0f) {
+        speed = PLAYER_SPEED;
+        attackCooldown = 0;
+        skill1Cooldown = 0;
+        skill2Cooldown = 0;
+        ultimateCooldown = 0;
+    }
+    
+    void update() override {
+        // 更新冷却时间
+        if (attackCooldown > 0) attackCooldown--;
+        if (skill1Cooldown > 0) skill1Cooldown--;
+        if (skill2Cooldown > 0) skill2Cooldown--;
+        if (ultimateCooldown > 0) ultimateCooldown--;
+        
+        // 移动
+        Vector2f movement(0, 0);
+        if (Keyboard::isKeyPressed(Keyboard::W)) movement.y -= speed;
+        if (Keyboard::isKeyPressed(Keyboard::S)) movement.y += speed;
+        if (Keyboard::isKeyPressed(Keyboard::A)) movement.x -= speed;
+        if (Keyboard::isKeyPressed(Keyboard::D)) movement.x += speed;
+        
+        // 确保不会移出屏幕
+        Vector2f newPos = getPosition() + movement;
+        if (newPos.x > 50 && newPos.x < WINDOW_WIDTH - 50) 
+            sprite.move(movement.x, 0);
+        if (newPos.y > 50 && newPos.y < WINDOW_HEIGHT - 50) 
+            sprite.move(0, movement.y);
+    }
+    
+    void attack(Vector2f targetPos, vector<Entity*>& projectiles, Texture& projTexture) {
+        if (attackCooldown <= 0) {
+            Entity* projectile = new Entity();
+            projectile->sprite.setTexture(projTexture);
+            projectile->sprite.setOrigin(projTexture.getSize().x/2, projTexture.getSize().y/2);
+            projectile->sprite.setPosition(getPosition());
+            
+            // 计算方向
+            Vector2f direction = targetPos - getPosition();
+            float length = sqrt(direction.x * direction.x + direction.y * direction.y);
+            if (length != 0) {
+                direction /= length;
+                projectile->velocity = direction * PROJECTILE_SPEED;
+            }
+            
+            projectiles.push_back(projectile);
+            attackCooldown = 60 / attackSpeed; // 基于攻击速度的冷却时间
+        }
+    }
+    
+    void useSkill1(Vector2f targetPos, vector<Entity*>& skills, Texture& skillTexture) {
+        if (skill1Cooldown <= 0) {
+            Entity* skill = new Entity();
+            skill->sprite.setTexture(skillTexture);
+            skill->sprite.setOrigin(skillTexture.getSize().x/2, skillTexture.getSize().y/2);
+            skill->sprite.setPosition(targetPos);
+            skill->sprite.setScale(2.0f, 2.0f);
+            skills.push_back(skill);
+            skill1Cooldown = 180; // 3秒冷却
+        }
+    }
+    
+    void useSkill2(Vector2f targetPos, vector<Entity*>& skills, Texture& skillTexture) {
+        if (skill2Cooldown <= 0) {
+            Entity* skill = new Entity();
+            skill->sprite.setTexture(skillTexture);
+            skill->sprite.setOrigin(skillTexture.getSize().x/2, skillTexture.getSize().y/2);
+            skill->sprite.setPosition(getPosition());
+            skill->sprite.setScale(1.5f, 1.5f);
+            
+            // 计算方向
+            Vector2f direction = targetPos - getPosition();
+            float length = sqrt(direction.x * direction.x + direction.y * direction.y);
+            if (length != 0) {
+                direction /= length;
+                skill->velocity = direction * PROJECTILE_SPEED * 0.8f;
+            }
+            
+            skills.push_back(skill);
+            skill2Cooldown = 240; // 4秒冷却
+        }
+    }
+    
+    void useUltimate(Vector2f targetPos, vector<Entity*>& ultimates, Texture& ultTexture) {
+        if (ultimateCooldown <= 0) {
+            Entity* ultimate = new Entity();
+            ultimate->sprite.setTexture(ultTexture);
+            ultimate->sprite.setOrigin(ultTexture.getSize().x/2, ultTexture.getSize().y/2);
+            ultimate->sprite.setPosition(targetPos);
+            ultimate->sprite.setScale(3.0f, 3.0f);
+            ultimates.push_back(ultimate);
+            ultimateCooldown = 480; // 8秒冷却
+        }
+    }
+};
+
+// 敌方英雄类
+class Enemy : public Entity {
+public:
+    Vector2f targetPosition;
+    float attackRange;
+    float attackDamage;
+    float attackSpeed;
+    float attackCooldown;
+    
+    Enemy() : attackRange(300), attackDamage(20), attackSpeed(0.8f) {
+        speed = PLAYER_SPEED * 0.7f;
+        attackCooldown = 0;
+    }
+    
+    void update(Vector2f playerPos, vector<Entity*>& enemyProjectiles, Texture& projTexture) {
+        if (!alive) return;
+        
+        // 更新冷却时间
+        if (attackCooldown > 0) attackCooldown--;
+        
+        // 简单AI：追逐玩家
+        Vector2f direction = playerPos - getPosition();
+        float distance = sqrt(direction.x * direction.x + direction.y * direction.y);
+        
+        if (distance < attackRange) {
+            // 在攻击范围内，尝试攻击
+            if (attackCooldown <= 0) {
+                Entity* projectile = new Entity();
+                projectile->sprite.setTexture(projTexture);
+                projectile->sprite.setOrigin(projTexture.getSize().x/2, projTexture.getSize().y/2);
+                projectile->sprite.setPosition(getPosition());
+                
+                // 计算方向
+                direction = playerPos - getPosition();
+                float length = sqrt(direction.x * direction.x + direction.y * direction.y);
+                if (length != 0) {
+                    direction /= length;
+                    projectile->velocity = direction * PROJECTILE_SPEED * 0.7f;
+                }
+                
+                enemyProjectiles.push_back(projectile);
+                attackCooldown = 60 / attackSpeed;
+            }
+        } else {
+            // 追逐玩家
+            if (distance > 0) {
+                direction /= distance;
+                sprite.move(direction * speed);
+            }
+        }
+    }
+};
+
+// 游戏主函数
+int main() {
+    // 创建游戏窗口
+    RenderWindow window(VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "简易王者荣耀");
+    window.setFramerateLimit(60);
+    
+    // 加载纹理
+    Texture playerTexture;
+    if (!playerTexture.loadFromFile("player.png")) {
+        cerr << "无法加载玩家纹理!" << endl;
+        return -1;
+    }
+    
+    Texture enemyTexture;
+    if (!enemyTexture.loadFromFile("enemy.png")) {
+        cerr << "无法加载敌人纹理!" << endl;
+        return -1;
+    }
+    
+    Texture projectileTexture;
+    if (!projectileTexture.loadFromFile("projectile.png")) {
+        cerr << "无法加载子弹纹理!" << endl;
+        return -1;
+    }
+    
+    Texture skill1Texture;
+    if (!skill1Texture.loadFromFile("skill1.png")) {
+        cerr << "无法加载技能1纹理!" << endl;
+        return -1;
+    }
+    
+    Texture skill2Texture;
+    if (!skill2Texture.loadFromFile("skill2.png")) {
+        cerr << "无法加载技能2纹理!" << endl;
+        return -1;
+    }
+    
+    Texture ultimateTexture;
+    if (!ultimateTexture.loadFromFile("ultimate.png")) {
+        cerr << "无法加载终极技能纹理!" << endl;
+        return -1;
+    }
+    
+    Texture backgroundTexture;
+    if (!backgroundTexture.loadFromFile("background.jpg")) {
+        cerr << "无法加载背景纹理!" << endl;
+        return -1;
+    }
+    
+    // 创建背景
+    Sprite background(backgroundTexture);
+    background.setScale(
+        static_cast<float>(WINDOW_WIDTH) / backgroundTexture.getSize().x,
+        static_cast<float>(WINDOW_HEIGHT) / backgroundTexture.getSize().y
+    );
+    
+    // 创建玩家
+    Player player;
+    player.sprite.setTexture(playerTexture);
+    player.sprite.setOrigin(playerTexture.getSize().x/2, playerTexture.getSize().y/2);
+    player.setPosition(Vector2f(WINDOW_WIDTH/2, WINDOW_HEIGHT/2));
+    
+    // 创建敌人
+    vector<Enemy*> enemies;
+    for (int i = 0; i < 5; ++i) {
+        Enemy* enemy = new Enemy();
+        enemy->sprite.setTexture(enemyTexture);
+        enemy->sprite.setOrigin(enemyTexture.getSize().x/2, enemyTexture.getSize().y/2);
+        enemy->setPosition(Vector2f(100 + rand() % 1000, 100 + rand() % 600));
+        enemies.push_back(enemy);
+    }
+    
+    // 游戏对象容器
+    vector<Entity*> projectiles;
+    vector<Entity*> skills;
+    vector<Entity*> ultimates;
+    vector<Entity*> enemyProjectiles;
+    
+    // 创建字体
+    Font font;
+    if (!font.loadFromFile("arial.ttf")) {
+        cerr << "无法加载字体!" << endl;
+        return -1;
+    }
+    
+    // 创建UI元素
+    Text healthText;
+    healthText.setFont(font);
+    healthText.setCharacterSize(24);
+    healthText.setFillColor(Color::Green);
+    healthText.setPosition(20, 20);
+    
+    Text levelText;
+    levelText.setFont(font);
+    levelText.setCharacterSize(24);
+    levelText.setFillColor(Color::Yellow);
+    levelText.setPosition(20, 50);
+    
+    Text goldText;
+    goldText.setFont(font);
+    goldText.setCharacterSize(24);
+    goldText.setFillColor(Color(255, 215, 0)); // 金色
+    goldText.setPosition(20, 80);
+    
+    Text cooldownText;
+    cooldownText.setFont(font);
+    cooldownText.setCharacterSize(20);
+    cooldownText.setFillColor(Color::Cyan);
+    cooldownText.setPosition(WINDOW_WIDTH - 250, 20);
+    
+    Text gameOverText;
+    gameOverText.setFont(font);
+    gameOverText.setCharacterSize(72);
+    gameOverText.setFillColor(Color::Red);
+    gameOverText.setString("游戏结束! 按R重新开始");
+    gameOverText.setPosition(WINDOW_WIDTH/2 - 300, WINDOW_HEIGHT/2 - 50);
+    
+    // 游戏主循环
+    bool gameOver = false;
+    Clock clock;
+    
+    while (window.isOpen()) {
+        // 计算帧时间
+        float deltaTime = clock.restart().asSeconds();
+        
+        // 事件处理
+        Event event;
+        while (window.pollEvent(event)) {
+            if (event.type == Event::Closed) {
+                window.close();
+            }
+            
+            if (event.type == Event::KeyPressed) {
+                if (event.key.code == Keyboard::Escape) {
+                    window.close();
+                }
+                
+                if (gameOver && event.key.code == Keyboard::R) {
+                    // 重新开始游戏
+                    gameOver = false;
+                    player.health = player.maxHealth;
+                    player.setPosition(Vector2f(WINDOW_WIDTH/2, WINDOW_HEIGHT/2));
+                    
+                    // 重置敌人
+                    for (auto enemy : enemies) {
+                        delete enemy;
+                    }
+                    enemies.clear();
+                    
+                    for (int i = 0; i < 5; ++i) {
+                        Enemy* enemy = new Enemy();
+                        enemy->sprite.setTexture(enemyTexture);
+                        enemy->sprite.setOrigin(enemyTexture.getSize().x/2, enemyTexture.getSize().y/2);
+                        enemy->setPosition(Vector2f(100 + rand() % 1000, 100 + rand() % 600));
+                        enemies.push_back(enemy);
+                    }
+                }
+            }
+            
+            if (!gameOver && event.type == Event::MouseButtonPressed) {
+                if (event.mouseButton.button == Mouse::Left) {
+                    player.attack(Vector2f(event.mouseButton.x, event.mouseButton.y), projectiles, projectileTexture);
+                }
+                else if (event.mouseButton.button == Mouse::Right) {
+                    player.useSkill1(Vector2f(event.mouseButton.x, event.mouseButton.y), skills, skill1Texture);
+                }
+            }
+            
+            if (!gameOver && event.type == Event::KeyPressed) {
+                if (event.key.code == Keyboard::Q) {
+                    player.useSkill1(Vector2f(Mouse::getPosition(window)), skills, skill1Texture);
+                }
+                else if (event.key.code == Keyboard::E) {
+                    player.useSkill2(Vector2f(Mouse::getPosition(window)), skills, skill2Texture);
+                }
+                else if (event.key.code == Keyboard::R) {
+                    player.useUltimate(Vector2f(Mouse::getPosition(window)), ultimates, ultimateTexture);
+                }
+            }
+        }
+        
+        if (!gameOver) {
+            // 更新玩家
+            player.update();
+            
+            // 更新敌人
+            for (auto enemy : enemies) {
+                enemy->update(player.getPosition(), enemyProjectiles, projectileTexture);
+            }
+            
+            // 更新玩家子弹
+            for (auto it = projectiles.begin(); it != projectiles.end(); ) {
+                Entity* proj = *it;
+                proj->setPosition(proj->getPosition() + proj->velocity);
+                
+                // 检查是否击中敌人
+                bool hit = false;
+                for (auto enemy : enemies) {
+                    if (enemy->alive && proj->getBounds().intersects(enemy->getBounds())) {
+                        enemy->health -= player.attackDamage;
+                        if (enemy->health <= 0) {
+                            enemy->alive = false;
+                            player.gold += 50;
+                            player.experience += 100;
+                            
+                            // 升级检查
+                            if (player.experience >= player.level * 200) {
+                                player.level++;
+                                player.maxHealth += 50;
+                                player.health = player.maxHealth;
+                                player.attackDamage += 10;
+                            }
+                        }
+                        hit = true;
+                        break;
+                    }
+                }
+                
+                // 移除出界的子弹
+                if (hit || proj->getPosition().x < 0 || proj->getPosition().x > WINDOW_WIDTH ||
+                    proj->getPosition().y < 0 || proj->getPosition().y > WINDOW_HEIGHT) {
+                    it = projectiles.erase(it);
+                    delete proj;
+                } else {
+                    ++it;
+                }
+            }
+            
+            // 更新敌人子弹
+            for (auto it = enemyProjectiles.begin(); it != enemyProjectiles.end(); ) {
+                Entity* proj = *it;
+                proj->setPosition(proj->getPosition() + proj->velocity);
+                
+                // 检查是否击中玩家
+                if (proj->getBounds().intersects(player.getBounds())) {
+                    player.health -= 10;
+                    if (player.health <= 0) {
+                        gameOver = true;
+                    }
+                    it = enemyProjectiles.erase(it);
+                    delete proj;
+                } else if (proj->getPosition().x < 0 || proj->getPosition().x > WINDOW_WIDTH ||
+                           proj->getPosition().y < 0 || proj->getPosition().y > WINDOW_HEIGHT) {
+                    it = enemyProjectiles.erase(it);
+                    delete proj;
+                } else {
+                    ++it;
+                }
+            }
+            
+            // 更新技能
+            for (auto it = skills.begin(); it != skills.end(); ) {
+                Entity* skill = *it;
+                
+                // 技能1是范围伤害
+                if (skill->sprite.getTexture() == &skill1Texture) {
+                    // 检查是否击中敌人
+                    for (auto enemy : enemies) {
+                        if (enemy->alive && skill->getBounds().intersects(enemy->getBounds())) {
+                            enemy->health -= player.attackDamage * 1.5f;
+                            if (enemy->health <= 0) {
+                                enemy->alive = false;
+                                player.gold += 50;
+                                player.experience += 100;
+                                
+                                if (player.experience >= player.level * 200) {
+                                    player.level++;
+                                    player.maxHealth += 50;
+                                    player.health = player.maxHealth;
+                                    player.attackDamage += 10;
+                                }
+                            }
+                        }
+                    }
+                    it = skills.erase(it);
+                    delete skill;
+                } 
+                // 技能2是移动的投射物
+                else if (skill->sprite.getTexture() == &skill2Texture) {
+                    skill->setPosition(skill->getPosition() + skill->velocity);
+                    
+                    // 检查是否击中敌人
+                    bool hit = false;
+                    for (auto enemy : enemies) {
+                        if (enemy->alive && skill->getBounds().intersects(enemy->getBounds())) {
+                            enemy->health -= player.attackDamage * 2.0f;
+                            if (enemy->health <= 0) {
+                                enemy->alive = false;
+                                player.gold += 50;
+                                player.experience += 100;
+                                
+                                if (player.experience >= player.level * 200) {
+                                    player.level++;
+                                    player.maxHealth += 50;
+                                    player.health = player.maxHealth;
+                                    player.attackDamage += 10;
+                                }
+                            }
+                            hit = true;
+                            break;
+                        }
+                    }
+                    
+                    if (hit || skill->getPosition().x < 0 || skill->getPosition().x > WINDOW_WIDTH ||
+                        skill->getPosition().y < 0 || skill->getPosition().y > WINDOW_HEIGHT) {
+                        it = skills.erase(it);
+                        delete skill;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+            
+            // 更新终极技能
+            for (auto it = ultimates.begin(); it != ultimates.end(); ) {
+                Entity* ult = *it;
+                
+                // 终极技能是范围伤害
+                for (auto enemy : enemies) {
+                    if (enemy->alive && ult->getBounds().intersects(enemy->getBounds())) {
+                        enemy->health -= player.attackDamage * 3.0f;
+                        if (enemy->health <= 0) {
+                            enemy->alive = false;
+                            player.gold += 50;
+                            player.experience += 100;
+                            
+                            if (player.experience >= player.level * 200) {
+                                player.level++;
+                                player.maxHealth += 50;
+                                player.health = player.maxHealth;
+                                player.attackDamage += 10;
+                            }
+                        }
+                    }
+                }
+                
+                it = ultimates.erase(it);
+                delete ult;
+            }
+        }
+        
+        // 更新UI文本
+        healthText.setString("生命值: " + to_string(static_cast<int>(player.health)) + "/" + to_string(static_cast<int>(player.maxHealth)));
+        levelText.setString("等级: " + to_string(player.level) + " (经验: " + to_string(player.experience) + "/" + to_string(player.level * 200) + ")");
+        goldText.setString("金币: " + to_string(player.gold));
+        
+        string cooldownInfo = "技能冷却:\n";
+        cooldownInfo += "Q(技能1): " + (player.skill1Cooldown > 0 ? to_string(player.skill1Cooldown/60) + "秒" : "就绪") + "\n";
+        cooldownInfo += "E(技能2): " + (player.skill2Cooldown > 0 ? to_string(player.skill2Cooldown/60) + "秒" : "就绪") + "\n";
+        cooldownInfo += "R(终极): " + (player.ultimateCooldown > 0 ? to_string(player.ultimateCooldown/60) + "秒" : "就绪");
+        cooldownText.setString(cooldownInfo);
+        
+        // 渲染
+        window.clear();
+        
+        // 绘制背景
+        window.draw(background);
+        
+        // 绘制玩家
+        player.draw(window);
+        
+        // 绘制敌人
+        for (auto enemy : enemies) {
+            enemy->draw(window);
+        }
+        
+        // 绘制子弹
+        for (auto proj : projectiles) {
+            proj->draw(window);
+        }
+        
+        // 绘制敌人子弹
+        for (auto proj : enemyProjectiles) {
+            proj->draw(window);
+        }
+        
+        // 绘制技能
+        for (auto skill : skills) {
+            skill->draw(window);
+        }
+        
+        // 绘制终极技能
+        for (auto ult : ultimates) {
+            ult->draw(window);
+        }
+        
+        // 绘制UI
+        window.draw(healthText);
+        window.draw(levelText);
+        window.draw(goldText);
+        window.draw(cooldownText);
+        
+        // 游戏结束画面
+        if (gameOver) {
+            window.draw(gameOverText);
+        }
+        
+        window.display();
+    }
+    
+    // 清理内存
+    for (auto proj : projectiles) delete proj;
+    for (auto skill : skills) delete skill;
+    for (auto ult : ultimates) delete ult;
+    for (auto enemy : enemies) delete enemy;
+    for (auto proj : enemyProjectiles) delete proj;
+    
+    return 0;
+}
